@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "S-Voice",
+  "version": "0.1.0",
+  "identifier": "com.s-voice.app",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "settings",
+        "title": "S-Voice — Settings",
+        "url": "index.html",
+        "width": 480,
+        "height": 540,
+        "resizable": false,
+        "minimizable": true,
+        "visible": false,
+        "center": true
+      },
+      {
+        "label": "floating",
+        "title": "S-Voice",
+        "url": "floating.html",
+        "x": 0,
+        "y": 0,
+        "width": 280,
+        "height": 64,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "visible": true,
+        "shadow": false
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "macOSPrivateApi": true,
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Local AI voice input",
+    "longDescription": "Hold a global hotkey, speak, get polished text inserted at the cursor. Powered by local Whisper and Ollama.",
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "entitlements": null
+    }
+  }
+}

@@ -1,0 +1,186 @@
+/* --- Settings window --- */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  color: #1f2328;
+  background: #f6f8fa;
+  -webkit-font-smoothing: antialiased;
+}
+.container {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+header h1 {
+  font-size: 16px;
+  margin: 0;
+  font-weight: 600;
+}
+.badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #ddf4ff;
+  color: #0969da;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.badge.recording { background: #ffebe9; color: #cf222e; }
+.badge.processing { background: #fff8c5; color: #9a6700; }
+.badge.polishing { background: #ddf4ff; color: #0969da; }
+.badge.error { background: #ffebe9; color: #cf222e; }
+
+section { display: flex; flex-direction: column; gap: 6px; }
+section h2 {
+  font-size: 12px;
+  margin: 8px 0 0 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #656d76;
+  font-weight: 600;
+}
+label { font-size: 12px; color: #656d76; font-weight: 500; }
+input[type="text"], select, textarea {
+  font: inherit;
+  padding: 6px 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: white;
+  color: #1f2328;
+  outline: none;
+  transition: border-color 0.15s;
+}
+input[type="text"]:focus, select:focus, textarea:focus {
+  border-color: #0969da;
+  box-shadow: 0 0 0 3px rgba(9,105,218,0.1);
+}
+textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; resize: vertical; }
+.row { display: flex; gap: 6px; align-items: center; }
+.row input[type="text"] { flex: 1; }
+.checkbox { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+details summary { cursor: pointer; color: #656d76; font-size: 12px; }
+.hint { margin: 2px 0 0 0; font-size: 11px; color: #8c959f; }
+
+.btn-primary, .btn-secondary {
+  font: inherit;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-primary {
+  background: #1f883d;
+  color: white;
+  font-weight: 500;
+}
+.btn-primary:hover { background: #1a7f37; }
+.btn-secondary {
+  background: #f6f8fa;
+  border-color: #d0d7de;
+  color: #1f2328;
+}
+.btn-secondary:hover { background: #f3f4f6; border-color: #afb8c1; }
+.btn-secondary.recording { background: #cf222e; color: white; border-color: #cf222e; }
+
+.actions { flex-direction: row; gap: 8px; }
+.actions button { flex: 1; }
+
+.status {
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.status.success { background: #dafbe1; color: #1a7f37; }
+.status.error   { background: #ffebe9; color: #cf222e; }
+.status.info    { background: #ddf4ff; color: #0969da; }
+
+/* Recording mode: the input is the active element being recorded */
+input.recording-hotkey {
+  border-color: #cf222e;
+  background: #fff5f5;
+  color: #cf222e;
+  font-weight: 500;
+}
+
+/* --- Floating panel --- */
+.floating-body {
+  background: transparent;
+  margin: 0;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+  /* Panel is persistent; don't intercept mouse clicks. The window itself
+     also has focus: false so it never grabs keyboard focus. */
+  pointer-events: none;
+}
+.floating-panel {
+  background: linear-gradient(
+    to bottom,
+    rgba(160, 200, 240, 0.58) 0%,
+    rgba(186, 215, 245, 0.42) 55%,
+    rgba(210, 230, 250, 0.22) 100%
+  );
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  border-radius: 12px;
+  padding: 8px 14px;
+  color: #0a2540;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  font-size: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.floating-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  position: relative;
+}
+.floating-text { font-weight: 500; text-align: center; line-height: 1; transform: translateY(-1px); color: #0a2540; }
+.floating-text.small { color: rgba(10, 37, 64, 0.55); font-size: 11px; position: absolute; right: 0; top: 50%; transform: translateY(calc(-50% - 1px)); }
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #8c8c8c;
+  display: inline-block;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+@keyframes breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.78); }
+}
+@keyframes fade {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+.waveform-bar {
+  height: 8px;
+  min-width: 8px;
+  width: 0%;
+  background: #8c8c8c;
+  border-radius: 4px;
+  transition: width 60ms linear, background-color 200ms;
+  align-self: center;          /* centre within the column-flex panel */
+}
+.waveform-bar.recording  { background: #30d158; animation: breathe 1.5s ease-in-out infinite; }
+.waveform-bar.processing  { background: #ff9f0a; animation: fade 1.5s ease-in-out infinite; }
+.waveform-bar.polishing   { background: #0969da; animation: fade 1.5s ease-in-out infinite; }
+.waveform-bar.error      { background: #ff3b30; }

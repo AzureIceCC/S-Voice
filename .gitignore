@@ -1,0 +1,24 @@
+# Rust / Tauri
+**/target/
+
+# Python
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# macOS
+.DS_Store
+
+# Logs & runtime
+**/*.log
+**/*.pid
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+Thumbs.db

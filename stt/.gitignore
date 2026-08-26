@@ -1,0 +1,5 @@
+.stt.pid
+stt.log
+__pycache__/
+*.pyc
+.venv/

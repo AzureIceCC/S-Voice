@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recording Panel (Mockup)</title>
+  <link rel="stylesheet" href="../ui/styles.css">
+  <style>
+    /* Backdrop: a synthetic macOS desktop so the panel reads clearly. */
+    body {
+      margin: 0;
+      height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+      background:
+        radial-gradient(ellipse at 30% 20%, #4a5d7a 0%, transparent 50%),
+        radial-gradient(ellipse at 70% 80%, #6a5a7a 0%, transparent 50%),
+        linear-gradient(180deg, #2a2c34 0%, #1c1e26 100%);
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      padding-bottom: 32px;
+    }
+    /* Override the transparent .floating-body for the mockup */
+    .floating-body {
+      background: transparent !important;
+      overflow: visible !important;
+    }
+    /* Disable backdrop-filter (headless Chrome doesn't composite it) */
+    .floating-panel {
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+      background: rgba(28, 28, 30, 0.96) !important;
+    }
+  </style>
+</head>
+<body class="floating-body">
+  <div class="floating-panel">
+    <div class="floating-row">
+      <span class="dot recording-dot"></span>
+      <span class="floating-text">录音中…</span>
+      <span class="floating-text small">5.2s</span>
+    </div>
+    <div class="waveform-track">
+      <div class="waveform-bar" style="width: 68%"></div>
+    </div>
+  </div>
+</body>
+</html>
