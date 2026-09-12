@@ -1,6 +1,6 @@
 # S-Voice
 
-AI voice input for macOS. Press a global hotkey, speak, get polished text
+AI voice input for **macOS**. Press a global hotkey, speak, get polished text
 inserted at the cursor. Apple SpeechAnalyzer is the default on macOS 26 and
 newer; local Whisper remains available as an explicitly selected offline backend.
 
