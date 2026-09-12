@@ -8,7 +8,7 @@
 
 # S-Voice
 
-macOS 上的 AI 语音输入。按下全局热键，讲话，润色后的文本自动插入到光标位置。**macOS 26 及以上默认使用 Apple SpeechAnalyzer（系统级识别）**；本地 Whisper 仍可作为离线后端被显式选用。
+macOS 上的 AI 语音输入，纯本地化项目，无需部署线上第三方API。按下全局热键，讲话，润色后的文本自动插入到光标位置。**macOS 26 及以上默认使用 Apple SpeechAnalyzer（系统级识别）**；本地 Whisper 仍可作为离线后端被显式选用。
 
 灵感来自 [Typeless](https://typeless.com)，从零开始用本地优先的组件构建：
 
@@ -234,7 +234,7 @@ cd stt && ../.venv/bin/python -m uvicorn stt_server:app --reload
 
 # S-Voice
 
-AI voice input for **macOS**. Press a global hotkey, speak, get polished text
+AI voice input for **macOS**, a pure localized program without necessary to deploy with an online model. Press a global hotkey, speak, get polished text
 inserted at the cursor. Apple SpeechAnalyzer is the default on macOS 26 and
 newer; local Whisper remains available as an explicitly selected offline backend.
 
