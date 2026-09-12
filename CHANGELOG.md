@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-09-12
+
 ### Added
 - **UI i18n (zh / en)** — added a `ui_language` setting (`zh` | `en`) to
   `Settings`, with `sanitize` validation. The settings window and floating
