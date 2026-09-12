@@ -12,6 +12,9 @@ let recordingStart = null;   // ms timestamp when current Recording began, else 
 let processingStart = null;  // ms timestamp when current Processing began, else null
 let lastProcessingSec = 0;   // most recent processing duration, shown briefly in idle
 let timerInterval = null;
+let uiLanguage = 'zh';
+const FLOAT_TEXT = { zh: { recording:'语音输入中…', processing:'处理中…', polishing:'润色中…', error:'错误', waiting:'等待中', startFail:'STT 启动失败', starting:'STT 启动中…' }, en: { recording:'Voice input…', processing:'Processing…', polishing:'Polishing…', error:'Error', waiting:'Waiting', startFail:'STT startup failed', starting:'Starting STT…' } };
+const ft = () => FLOAT_TEXT[uiLanguage] || FLOAT_TEXT.zh;
 
 function updateTimer() {
   if (recordingStart !== null) {
@@ -34,7 +37,7 @@ function applyState(state) {
   const wave = $('waveform');
   wave.className = 'waveform-bar';
   if (state === 'recording') {
-    $('rec-state').textContent = '语音输入中…';
+    $('rec-state').textContent = ft().recording;
     wave.classList.add('recording');
     if (timerInterval === null) {
       // Fresh recording: clear any stale processing time, start the
@@ -45,7 +48,7 @@ function applyState(state) {
       timerInterval = setInterval(updateTimer, 100);
     }
   } else if (state === 'processing') {
-    $('rec-state').textContent = '处理中…';
+    $('rec-state').textContent = ft().processing;
     wave.classList.add('processing');
     wave.style.width = '100%';
     if (recordingStart !== null) {
@@ -58,11 +61,11 @@ function applyState(state) {
   } else if (state === 'polishing') {
     // STT is done; Ollama is rewriting the transcript. Keep the
     // processing clock running so the user sees the polish leg too.
-    $('rec-state').textContent = '润色中…';
+    $('rec-state').textContent = ft().polishing;
     wave.classList.add('polishing');
     wave.style.width = '100%';
   } else if (state === 'error') {
-    $('rec-state').textContent = '错误';
+    $('rec-state').textContent = ft().error;
     wave.classList.add('error');
     wave.style.width = '100%';
     clearTimers();
@@ -71,7 +74,7 @@ function applyState(state) {
     // idle / waiting — panel returns to the quiet "等待中" state. We do
     // NOT keep the just-pasted text visible here; the recognised content
     // is in the clipboard / already pasted, the panel just sits quietly.
-    $('rec-state').textContent = '等待中';
+    $('rec-state').textContent = ft().waiting;
     wave.style.width = '0%';
     if (processingStart !== null) {
       // Freeze the final processing duration so the user can see how
@@ -101,14 +104,21 @@ async function fetchAndApplyState() {
   } catch (e) { /* ignore */ }
 }
 
+async function loadUiLanguage() {
+  try {
+    const settings = await window.t.invoke('cmd_get_settings');
+    if (settings && (settings.ui_language === 'zh' || settings.ui_language === 'en')) uiLanguage = settings.ui_language;
+  } catch (e) { /* keep Chinese default */ }
+}
+
 // Bridge startup status: starting / ready / failed.
 function applyBridgeStatus(status) {
   if (status === 'failed') {
-    $('rec-state').textContent = 'STT 启动失败';
+    $('rec-state').textContent = ft().startFail;
     $('waveform').className = 'waveform-bar error';
     $('waveform').style.width = '100%';
   } else if (status === 'starting') {
-    $('rec-state').textContent = 'STT 启动中…';
+    $('rec-state').textContent = ft().starting;
     $('waveform').className = 'waveform-bar processing';
     $('waveform').style.width = '100%';
   } else if (status === 'ready') {
@@ -130,7 +140,14 @@ function applyBridgeStatus(status) {
       await window.t.event.listen('bridge-status', (event) => {
         if (typeof event.payload === 'string') applyBridgeStatus(event.payload);
       });
+      await window.t.event.listen('settings-changed', (event) => {
+        if (event.payload && (event.payload.ui_language === 'zh' || event.payload.ui_language === 'en')) {
+          uiLanguage = event.payload.ui_language;
+          fetchAndApplyState();
+        }
+      });
     }
   } catch (e) { /* ignore */ }
+  await loadUiLanguage();
   fetchAndApplyState();
 })();

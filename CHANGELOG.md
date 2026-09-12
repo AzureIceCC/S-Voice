@@ -6,7 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **UI i18n (zh / en)** — added a `ui_language` setting (`zh` | `en`) to
+  `Settings`, with `sanitize` validation. The settings window and floating
+  panel both render labels in the chosen language. The settings form has a
+  "显示语言" / "Display language" dropdown at the top.
+
 ### Changed
+- **`#ui-language` auto-saves on change** — switching the dropdown in the
+  settings window immediately calls `cmd_update_settings` (no need to press
+  "保存"). The other fields still require an explicit save because they
+  trigger hotkey re-registration, model switches, etc. The change broadcasts
+  a `settings-changed` event so the floating panel re-renders its state
+  labels (等待中 → Waiting) in real time. Settings window itself
+  pre-applies the language via `applyUiLanguage` for instant feedback.
+- **Polish prompt now explicitly preserves the original language** —
+  `DEFAULT_PROMPT` (in `polish.rs`) gained rule 9: "保持用户原本说的语言——
+  中文保持中文，英文保持英文。如果原话是中英混合，保留混合状态。
+  绝对不要翻译成另一种语言". The previous version's rule 7 ("输出内容严格
+  限定在用户说过的话之内") was sometimes overridden by `qwen3.5:2b-q4_K_M`,
+  which would silently translate English transcripts to Chinese on
+  best-effort interpretation. Verified: a 88-character English transcript
+  ("Is u still a probrem with English wors imput...") now polishes to a
+  clean English version rather than a Chinese paraphrase.
 - Reworked deployment documentation around Apple SpeechAnalyzer as the default
   STT backend, with separate source-build and optional Local Whisper setup,
   compatibility, permission, signing, troubleshooting, and maintainer-check

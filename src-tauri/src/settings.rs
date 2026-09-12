@@ -38,6 +38,9 @@ pub struct Settings {
     /// STT language hint passed to the bridge.
     #[serde(default)]
     pub language: String,
+    /// UI display language (`zh` or `en`), independent from STT language.
+    #[serde(default = "default_ui_language")]
+    pub ui_language: String,
     /// Explicit speech recognizer selection. `local_whisper` preserves the
     /// MLX bridge; `apple_speech` uses the system-managed SpeechAnalyzer.
     /// The pipeline never silently switches between them.
@@ -90,6 +93,7 @@ impl Default for Settings {
             // tauri-plugin-global-shortcut can't register them.
             hotkey: "Cmd+[".to_string(),
             language: "auto".to_string(),
+            ui_language: default_ui_language(),
             stt_backend: default_stt_backend(),
             stt_model: "mlx-community/belle-whisper-large-v3-turbo-zh-fp16".to_string(),
             ollama_model: "qwen3.5:2b-q4_K_M".to_string(),
@@ -115,6 +119,8 @@ impl Default for Settings {
 fn default_stt_backend() -> String {
     "apple_speech".to_string()
 }
+
+fn default_ui_language() -> String { "zh".to_string() }
 
 /// Hotkey key names that tauri-plugin-global-shortcut cannot register on
 /// macOS. macOS shares scancodes between left/right Cmd/Alt/Shift, so
@@ -272,6 +278,12 @@ impl Settings {
                 self.stt_backend
             );
             self.stt_backend = default_stt_backend();
+            changed = true;
+        }
+
+        if !matches!(self.ui_language.as_str(), "zh" | "en") {
+            tracing::warn!("unknown UI language {:?}; resetting to Chinese", self.ui_language);
+            self.ui_language = default_ui_language();
             changed = true;
         }
 
@@ -446,6 +458,7 @@ mod tests {
         let s = Settings {
             hotkey: "Cmd+Shift+F1".into(),
             language: "en".into(),
+            ui_language: "en".into(),
             stt_backend: "apple_speech".into(),
             stt_model: "mlx-community/whisper-small".into(),
             ollama_model: "llama3:8b".into(),
@@ -462,6 +475,7 @@ mod tests {
         assert_eq!(back.polish_enabled, s.polish_enabled);
         assert_eq!(back.streaming_enabled, s.streaming_enabled);
         assert_eq!(back.stt_backend, s.stt_backend);
+        assert_eq!(back.ui_language, s.ui_language);
         assert_eq!(back.ollama_model, s.ollama_model);
     }
 
@@ -484,6 +498,7 @@ mod tests {
         }"#;
         let s: Settings = serde_json::from_str(json).expect("missing fields must default");
         assert_eq!(s.stt_backend, "apple_speech");
+        assert_eq!(s.ui_language, "zh");
         assert!(!s.streaming_enabled);
         assert!(!s.debug, "missing debug must default to false");
     }
@@ -496,6 +511,13 @@ mod tests {
         };
         assert!(s.sanitize());
         assert_eq!(s.stt_backend, "apple_speech");
+    }
+
+    #[test]
+    fn sanitize_resets_unknown_ui_language_to_chinese() {
+        let mut s = Settings { ui_language: "fr".into(), ..Settings::default() };
+        assert!(s.sanitize());
+        assert_eq!(s.ui_language, "zh");
     }
 
     // ----- #11: safe save (diff-skip + external-edit detection) + reload -----

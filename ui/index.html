@@ -14,19 +14,24 @@
     </header>
 
     <section>
-      <label>全局热键</label>
+      <label id="hotkey-label">全局热键</label>
       <div class="row">
-        <input type="text" id="hotkey" readonly placeholder="点击右侧按钮录制">
+        <input type="text" id="hotkey" readonly>
         <button id="record-hotkey" class="btn-secondary">录制</button>
         <button id="clear-hotkey" class="btn-secondary" hidden>✕</button>
       </div>
-      <p class="hint" id="hotkey-hint">支持单键或组合键（Cmd+Shift+Space）</p>
+      <p class="hint" id="hotkey-hint">支持单键或组合键（Cmd+[）</p>
     </section>
 
     <section>
-      <label>STT 语言</label>
+      <label id="ui-language-label">显示语言</label>
+      <select id="ui-language"><option value="zh">中文</option><option value="en">English</option></select>
+    </section>
+
+    <section>
+      <label id="stt-language-label">STT 语言</label>
       <select id="language">
-        <option value="auto" selected>自动检测</option>
+        <option id="auto-language" value="auto" selected>自动检测</option>
         <option value="zh">中文 (zh)</option>
         <option value="en">English (en)</option>
         <option value="ja">日本語 (ja)</option>
@@ -34,61 +39,61 @@
     </section>
 
     <section>
-      <label>语音识别后端</label>
+      <label id="backend-label">语音识别后端</label>
       <select id="stt-backend">
-        <option value="apple_speech" selected>Apple SpeechAnalyzer（系统本地）</option>
-        <option value="local_whisper">本地 Whisper（离线）</option>
+        <option id="apple-option" value="apple_speech" selected>Apple SpeechAnalyzer（系统本地）</option>
+        <option id="whisper-option" value="local_whisper">本地 Whisper（离线）</option>
       </select>
-      <p class="hint">后端选择是显式的；所选后端失败时不会自动切换。SpeechAnalyzer 使用 macOS 管理的本地语音模型。</p>
+      <p class="hint" id="backend-hint">后端选择是显式的；所选后端失败时不会自动切换。</p>
     </section>
 
     <section>
-      <label>本地 Whisper 模型</label>
+      <label id="stt-model-label">本地 Whisper 模型</label>
       <input type="text" id="stt-model">
     </section>
 
     <section>
-      <label>转写模式</label>
+      <label id="mode-label">转写模式</label>
       <div class="row" id="streaming-mode">
         <label class="checkbox">
           <input type="radio" name="streaming" value="off" id="streaming-off" checked>
-          <span>一次性转写（稳定，推荐）</span>
+          <span id="once-label">一次性转写（稳定，推荐）</span>
         </label>
-        <label class="checkbox" title="v0.2 实现：需要换 faster-whisper 替换 mlx-audio 的 alignatt streaming">
+        <label class="checkbox" id="realtime-label-wrap">
           <input type="radio" name="streaming" value="on" id="streaming-on" disabled>
-          <span>实时转写（开发中）</span>
+          <span id="realtime-label">实时转写（开发中）</span>
         </label>
       </div>
-      <p class="hint" id="streaming-hint">实时转写暂未启用：mlx-audio 的 streaming 部分识别质量不稳定，v0.2 计划改用 faster-whisper 重新实现。</p>
+      <p class="hint" id="streaming-hint">实时转写暂未启用</p>
     </section>
 
     <section>
-      <h2>Ollama 润色</h2>
+      <h2 id="polish-title">Ollama 润色</h2>
       <div class="row">
         <label class="checkbox">
           <input type="checkbox" id="polish-enabled" checked>
-          <span>启用 LLM 润色</span>
+          <span id="polish-label">启用 LLM 润色</span>
         </label>
       </div>
-      <label>Ollama 模型</label>
+      <label id="ollama-model-label">Ollama 模型</label>
       <input type="text" id="ollama-model">
-      <label>Keep-alive (空闲多久后卸载)</label>
+      <label id="keepalive-label">Keep-alive (空闲多久后卸载)</label>
       <input type="text" id="ollama-keepalive" placeholder="30m">
       <details>
-        <summary>自定义润色 prompt（留空使用默认）</summary>
+        <summary id="prompt-summary">自定义润色 prompt（留空使用默认）</summary>
         <textarea id="polish-prompt" rows="6"></textarea>
       </details>
     </section>
 
     <section>
-      <h2>诊断</h2>
+      <h2 id="diagnostic-title">诊断</h2>
       <div class="row">
         <label class="checkbox">
           <input type="checkbox" id="debug">
-          <span>Debug 模式（详细日志，写入 ~/Library/Logs/S-Voice/）</span>
+          <span id="debug-label">Debug 模式（详细日志）</span>
         </label>
       </div>
-      <label>日志文件路径</label>
+      <label id="log-label">日志文件路径</label>
       <div class="row">
         <input type="text" id="log-path" readonly>
         <button id="open-log-dir" class="btn-secondary">在 Finder 中显示</button>

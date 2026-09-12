@@ -224,6 +224,7 @@ fn cmd_update_settings(
         |candidate| candidate.save().map_err(|e| format!("{e:#}")),
     )?;
     let new_debug = committed.debug;
+    let committed_for_event = committed.clone();
     *current = committed;
     drop(current);
 
@@ -233,6 +234,7 @@ fn cmd_update_settings(
             tracing::warn!("logging toggle failed: {e}");
         }
     }
+    let _ = app.emit("settings-changed", &committed_for_event);
     Ok(())
 }
 
@@ -407,6 +409,7 @@ fn cmd_reload_settings(
         new_settings.ollama_model,
         new_settings.polish_enabled
     );
+    let _ = app.emit("settings-changed", &new_settings);
     Ok(new_settings)
 }
 
