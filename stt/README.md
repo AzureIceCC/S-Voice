@@ -1,8 +1,14 @@
-# STT service
+# Optional Local Whisper STT service
 
-Local MLX belle-whisper bridge. The desktop client (Electron / Tauri / Swift) records
-audio, POSTs it here, and gets back transcribed text. The model stays loaded in memory
-between calls, so warm requests are sub-second.
+This directory implements S-Voice's optional local MLX belle-whisper backend.
+Apple SpeechAnalyzer is the default backend on macOS 26 and does not use this
+service. S-Voice only sends recorded audio here when **Local Whisper** is
+explicitly selected in Settings; backend failures never trigger an automatic
+switch.
+
+The Tauri client records audio, POSTs it to this FastAPI service, and receives
+transcribed text. The model can stay loaded between calls for faster warm
+requests and unloads after the configured idle interval.
 
 ## Run
 

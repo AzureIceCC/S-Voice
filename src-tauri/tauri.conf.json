@@ -53,7 +53,7 @@
     ],
     "category": "Productivity",
     "shortDescription": "Local AI voice input",
-    "longDescription": "Hold a global hotkey, speak, get polished text inserted at the cursor. Powered by local Whisper and Ollama.",
+    "longDescription": "Press a global hotkey, speak, and insert recognized text at the cursor. Apple SpeechAnalyzer is the default backend; local Whisper and Ollama polish are optional.",
     "macOS": {
       "minimumSystemVersion": "12.0",
       "entitlements": null

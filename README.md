@@ -15,48 +15,55 @@ components:
 ## Architecture
 
 ```
-┌────────────────┐    HTTP      ┌────────────────┐
-│  Tauri App     │ ──────────►  │  STT bridge    │  ─►  MLX belle-whisper
-│  (Rust + HTML) │ ◄──────────  │  (FastAPI)     │  ◄─  (always-loaded)
-└────────────────┘              └────────────────┘
-        │                            ▲
-        │ Cmd+V paste                │ audio/wav
-        ▼                            │
-   ┌─────────┐                  ┌──────────┐
-   │  Any    │                  │  cpal    │
-   │  active │                  │  mic     │
-   │  app    │                  └──────────┘
-   └─────────┘
-        │                            ▲
-        ▼                            │
-   ┌─────────┐   HTTP localhost      │
-   │ Ollama  │ ◄────────────────────┘  (polish text)
-   │ qwen3.5 │
-   └─────────┘
+┌────────────────┐
+│ cpal microphone│
+└───────┬─────────┘
+       │ WAV
+       ▼
+┌────────────────┐       explicitly selected STT backend
+│ Tauri pipeline │──┬──► Apple SpeechAnalyzer (default, on-device)
+│ (Rust + HTML)  │  └──► FastAPI STT bridge ──► MLX Whisper (optional)
+└───────┬─────────┘
+       │ recognized text
+       ▼
+┌────────────────┐       optional HTTP       ┌────────────────┐
+│ Tauri pipeline │ ─────────────────────► │ Ollama polish  │
+└───────┬─────────┘ ◄────────────────────── └────────────────┘
+       │ clipboard + CGEventPost Cmd+V
+       ▼
+┌────────────────┐
+│ active macOS app│
+└────────────────┘
 ```
 
-The STT bridge is a separate Python process (FastAPI on `127.0.0.1:18787`) so the
-MLX runtime stays out of the Rust app bundle and the model can stay loaded
-between requests.
+The selected backend is authoritative: failures are surfaced to the user and do
+not automatically switch backends. Apple SpeechAnalyzer is the default and runs
+through a bundled Swift helper using system-managed on-device model assets. The
+Python FastAPI bridge on `127.0.0.1:18787` is only used when Local Whisper is
+explicitly selected; it keeps the MLX runtime outside the Rust app bundle.
 
 ## Layout
 
 ```
 s-voice/
-├── stt/                   # FastAPI bridge + start/stop scripts
+├── scripts/               # setup helpers + Apple capability probe
+├── stt/                   # optional MLX/FastAPI backend + scripts
 ├── src-tauri/             # Rust backend (Tauri 2)
+│   ├── native/
+│   │   └── apple_speech_helper.swift # SpeechAnalyzer helper
 │   ├── src/
 │   │   ├── main.rs        # entry
 │   │   ├── lib.rs         # Tauri setup + commands
 │   │   ├── audio.rs       # cpal capture, dedicated worker thread
+│   │   ├── apple_speech.rs # Swift helper lifecycle + IPC
 │   │   ├── hotkey.rs      # global shortcut combo parser
-│   │   ├── stt_client.rs  # HTTP to STT bridge
+│   │   ├── stt_client.rs  # HTTP to optional STT bridge
 │   │   ├── polish.rs      # HTTP to Ollama (keep_alive=30m)
 │   │   ├── output.rs      # clipboard + Cmd+V paste
 │   │   ├── settings.rs    # JSON persistence
 │   │   ├── pipeline.rs    # state machine orchestrator
 │   │   └── tray.rs        # system tray menu
-│   ├── ui/                # frontend (sibling to src-tauri)
+│   ├── build.rs             # compiles and embeds Swift helper
 │   ├── Cargo.toml
 │   ├── tauri.conf.json
 │   └── capabilities/
@@ -65,35 +72,75 @@ s-voice/
 
 ## Run
 
-### One-time setup
+### Requirements
+
+- Apple Silicon Mac. Intel builds are not part of the tested deployment path.
+- macOS 26 or newer for the default Apple SpeechAnalyzer backend.
+- Xcode 26 with its command-line tools selected (`xcode-select -p`).
+- Rust 1.77 or newer and Tauri CLI 2 (`cargo install tauri-cli --version '^2'`).
+- Ollama only when local text polish is enabled.
+- `uv` and Python 3.12 only when the optional Local Whisper backend is used.
+
+The application bundle declares macOS 12 as its minimum because Local Whisper
+can run without SpeechAnalyzer on older macOS releases. Building the current
+source still requires Xcode 26 because the bundled Swift helper references the
+macOS 26 Speech framework APIs.
+
+### Build and install the default Apple Speech configuration
 
 ```bash
-# From s-voice/ root
-./scripts/setup_venv.sh     # uv venv with mlx-audio + fastapi
+# Clone and enter the repository
+git clone https://github.com/AzureIceCC/S-Voice.git
+cd S-Voice
 
-# Pull MLX belle-whisper (one-time, ~1.5GB)
-# Already at ~/.cache/huggingface/hub/models--mlx-community--belle-whisper-large-v3-turbo-zh-fp16
-
-# Pull Ollama model
+# Optional local polish model
 ollama pull qwen3.5:2b-q4_K_M
+
+# Build the bundled app (requires Xcode 26 for SpeechAnalyzer)
+cd src-tauri
+cargo tauri build --bundles app
+
+# Install the result
+ditto target/release/bundle/macos/S-Voice.app /Applications/S-Voice.app
 ```
 
-### Launch
+Launch `/Applications/S-Voice.app` from Finder. Apple SpeechAnalyzer is selected
+by default and does not require Python, MLX, or the STT bridge. Its language
+asset is managed by macOS and may be downloaded the first time it is needed.
+
+No prebuilt, notarized binary is currently published in GitHub Releases. A local
+source build may trigger Gatekeeper, and replacing or re-signing the app can make
+macOS treat it as a new Accessibility entry. If permission stops working after
+a rebuild, remove the stale S-Voice entry and add `/Applications/S-Voice.app`
+again.
+
+### Optional Local Whisper setup
 
 ```bash
-# Terminal 1 — STT bridge (background)
-./stt/start_stt.sh
+# From the repository root
+./scripts/setup_venv.sh
 
-# Terminal 2 — Tauri app (dev mode)
-cd src-tauri
-cargo run
-# or
-./target/debug/s-voice
+# Start the bridge before selecting Local Whisper in Settings
+./stt/start_stt.sh
 ```
 
 The STT bridge is only needed when the local Whisper backend is selected. The
 app checks it at startup and attempts to run `stt/start_stt.sh`; a source checkout
-or an explicit `STT_HOME` is currently required for that script.
+or an explicit `STT_HOME` is currently required for that script. For an installed
+app backed by this checkout, set `STT_HOME` to the absolute repository path before
+launching S-Voice, or start the bridge manually from the checkout. The first
+transcription downloads the configured Hugging Face model if it is not cached;
+allow roughly 1.5GB for the model and about 2-3GB of warm runtime memory.
+
+### Development launch
+
+```bash
+cd src-tauri
+cargo run
+```
+
+For persistent macOS microphone, Speech Recognition, and Accessibility grants,
+use the installed `.app` rather than relying on the bare development binary.
 
 ### First launch (macOS permissions)
 
@@ -102,6 +149,27 @@ or an explicit `STT_HOME` is currently required for that script.
    System Settings → Privacy & Security → Accessibility → enable S-Voice.
 3. **Speech Recognition** — macOS may request access when first selecting the
    Apple backend. Failures do not switch to local Whisper.
+
+## Troubleshooting
+
+- **Hotkey works but text is not inserted** — enable S-Voice in System Settings
+  → Privacy & Security → Accessibility. After rebuilding/reinstalling, remove a
+  stale entry and add `/Applications/S-Voice.app` again.
+- **Microphone recording fails** — enable S-Voice under Privacy & Security →
+  Microphone, then relaunch the installed app.
+- **Apple Speech fails immediately** — confirm macOS 26+, grant Speech
+  Recognition access, and allow the system language asset to download. S-Voice
+  will report the error; it will not switch to Local Whisper automatically.
+- **Local Whisper is unreachable** — run `./stt/start_stt.sh`, then check
+  `curl http://127.0.0.1:18787/health`. Installed builds need a valid `STT_HOME`
+  or a bridge started manually from a checkout.
+- **Local polish fails** — confirm Ollama is running and that
+  `ollama list` contains the model configured in Settings. Disable polish to use
+  the raw STT result.
+- **Inspect logs** — the canonical file is
+  `~/Library/Logs/S-Voice/s-voice.log`; unified logs use subsystem
+  `com.s-voice.app`. Avoid launching with `RUST_LOG=warn` when collecting INFO
+  performance timings.
 
 ## Default hotkey
 
@@ -141,7 +209,7 @@ Bundled-app validation on 2026-09-12 with Apple SpeechAnalyzer and
 The three consecutive recordings were 2.9s, 3.0s, and 8.9s long and completed
 without capture, pipeline, or paste errors.
 
-### Legacy local Whisper baseline
+### Optional Local Whisper baseline
 
 实测数据（4 段录音，5-6s 中文音频，2026-08-22 `Cmd+[` hotkey 路径）：
 
@@ -153,11 +221,12 @@ without capture, pipeline, or paste errors.
 | Clipboard + paste | <100ms |  |
 | **Total perceived latency** | **11-23s** | 适合"按一下、说一段、等几秒、贴上去"的工作流 |
 
-> **不适合实时对话场景**。11-23s 总延迟对打字式语音输入尚可，对"边说边贴"的实时性需求不友好。
-> 极致低延迟需求：关掉 polish（`settings.polish_enabled = false`），只跑 STT → 总延迟可压到 2-10s。
+> These figures describe the optional 2026-08-22 MLX/9B configuration, not the
+> current Apple SpeechAnalyzer + 2B Q4 default path above.
 
-Memory when everything is warm: ~12GB total (macOS baseline + Ollama ~6GB +
-STT bridge ~3GB + Tauri ~250MB).
+That legacy all-local stack measured about 12GB total when warm (macOS baseline
++ Ollama 9B ~6GB + STT bridge ~3GB + Tauri ~250MB). It is not representative
+of the current default Apple SpeechAnalyzer + 2B Q4 configuration.
 
 ## Known limitations (v0.2)
 
@@ -188,4 +257,4 @@ cd stt && ../.venv/bin/python -m uvicorn stt_server:app --reload
 
 ## License
 
-MIT.
+Licensed under the [Apache License 2.0](LICENSE).

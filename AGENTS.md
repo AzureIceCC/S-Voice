@@ -7,7 +7,8 @@
 > users want features and usage.
 
 Local AI voice input for macOS. Press a global hotkey, speak, get text
-inserted at the cursor. Tauri 2 + MLX Whisper + Ollama polish.
+inserted at the cursor. Tauri 2 with Apple SpeechAnalyzer as the default STT,
+optional local MLX Whisper through a FastAPI bridge, and optional Ollama polish.
 
 ## Current state
 
@@ -15,13 +16,15 @@ inserted at the cursor. Tauri 2 + MLX Whisper + Ollama polish.
   default STT backend, local MLX Whisper remains explicitly selectable, and
   automatic fallback between them is intentionally disabled. This release also
   includes the #11 and #13-#20 reliability/performance work.
-- **Run command**: `cargo run` (bare binary, see #7 below)
+- **Run command**: installed bundled `.app` for normal use; `cargo run` for
+  development only (bare binary permission caveats are documented under #7).
 - **Hotkey**: `Cmd+[` (default; was `Cmd+Shift+Space` but macOS grabs it for
   input-source switching)
 - **Polish**: disabled by default (cold start adds 30s timeout + per-turn
   latency). Re-enable in settings once raw STT speed is acceptable.
-- **STT bridge**: separate Python process (`./stt/start_stt.sh`); runs in
-  background, sometimes exits after long idle (see backlog #5).
+- **STT backends**: Apple SpeechAnalyzer is the default and needs no Python
+  bridge. Local MLX Whisper is explicitly selectable and uses the separate
+  `./stt/start_stt.sh` process. There is intentionally no automatic fallback.
 - **Settings**: persist immediately on every change; `Settings::sanitize`
   auto-saves bad-hotkey fixes; `RunEvent::Exit` adds an exit-time save
   backstop.
@@ -35,6 +38,27 @@ inserted at the cursor. Tauri 2 + MLX Whisper + Ollama polish.
   no setup needed in release builds. File log at
   `~/Library/Logs/S-Voice/s-voice.log` is still the canonical
   long-term record.
+
+### New-maintainer verification
+
+From a clean checkout with Xcode 26 selected, run:
+
+```bash
+cd src-tauri
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo tauri build --bundles app
+cd ..
+node --check ui/app.js
+plutil -lint src-tauri/Info.plist
+git diff --check
+```
+
+The bundled `.app` still needs manual microphone, Speech Recognition, global
+hotkey, and Accessibility verification on a real Mac. Local Whisper additionally
+needs `./scripts/setup_venv.sh`, `./stt/start_stt.sh`, and a `/health` check. Do
+not treat a successful Apple test as verification of the optional MLX bridge, or
+vice versa.
 
 ## Known issues & future plans
 

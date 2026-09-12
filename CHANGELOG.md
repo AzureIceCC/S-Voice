@@ -4,6 +4,16 @@ All notable changes to S-Voice are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Reworked deployment documentation around Apple SpeechAnalyzer as the default
+  STT backend, with separate source-build and optional Local Whisper setup,
+  compatibility, permission, signing, troubleshooting, and maintainer-check
+  guidance.
+- Changed the project license from MIT to Apache License 2.0 and synchronized
+  the README and Cargo package metadata.
+
 ## [0.2.0] — 2026-09-12
 
 ### Added
