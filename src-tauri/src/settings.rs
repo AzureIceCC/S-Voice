@@ -120,7 +120,9 @@ fn default_stt_backend() -> String {
     "apple_speech".to_string()
 }
 
-fn default_ui_language() -> String { "zh".to_string() }
+fn default_ui_language() -> String {
+    "zh".to_string()
+}
 
 /// Hotkey key names that tauri-plugin-global-shortcut cannot register on
 /// macOS. macOS shares scancodes between left/right Cmd/Alt/Shift, so
@@ -282,7 +284,10 @@ impl Settings {
         }
 
         if !matches!(self.ui_language.as_str(), "zh" | "en") {
-            tracing::warn!("unknown UI language {:?}; resetting to Chinese", self.ui_language);
+            tracing::warn!(
+                "unknown UI language {:?}; resetting to Chinese",
+                self.ui_language
+            );
             self.ui_language = default_ui_language();
             changed = true;
         }
@@ -515,7 +520,10 @@ mod tests {
 
     #[test]
     fn sanitize_resets_unknown_ui_language_to_chinese() {
-        let mut s = Settings { ui_language: "fr".into(), ..Settings::default() };
+        let mut s = Settings {
+            ui_language: "fr".into(),
+            ..Settings::default()
+        };
         assert!(s.sanitize());
         assert_eq!(s.ui_language, "zh");
     }

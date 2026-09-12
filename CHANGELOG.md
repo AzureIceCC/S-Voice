@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- CI builds on pre-macOS-26 SDKs now embed an explicit unsupported Apple Speech
+  helper stub instead of failing before Rust tests can run. SDK 26 and newer
+  still compile the real SpeechAnalyzer helper and treat any compiler error as
+  a hard build failure.
+
 ## [0.2.1] — 2026-09-12
 
 ### Added
