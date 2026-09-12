@@ -4,5 +4,7 @@
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>S-Voice records audio while you hold the global hotkey, then transcribes and pastes the result. Recording stops the moment you release the hotkey.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>S-Voice uses the system SpeechAnalyzer only when you explicitly select the Apple Speech backend.</string>
 </dict>
 </plist>

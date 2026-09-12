@@ -13,40 +13,73 @@ pub enum HotkeyError {
     InvalidCombo(String),
     #[error("unknown key in combo: {0}")]
     UnknownKey(String),
+    /// The OS-level global-shortcut plugin refused to register an otherwise
+    /// valid combo (parse succeeded). Distinct from `InvalidCombo` /
+    /// `UnknownKey` so callers can tell "the user typed something we can't
+    /// understand" apart from "macOS / the platform rejected it" — the
+    /// latter usually means permission isn't set or the combo is already
+    /// bound by another app.
+    #[error("failed to register hotkey with OS: {0}")]
+    Registration(String),
 }
 
 /// (Re)register the global hotkey for the given combo string. Unregisters any
 /// previously registered shortcut first. Also registers Esc as a fallback
 /// toggle key — handy when the main hotkey is unresponsive.
+///
+/// Errors for the **main** hotkey are surfaced: if `combo` fails to parse
+/// (typo, unknown key, modifier-only) or the OS rejects registration, the
+/// error is returned to the caller. The Esc fallback is still registered
+/// best-effort before returning, so the user can use Escape to recover if
+/// the main hotkey is the problem.
+///
+/// Side-effect note: this function calls `unregister_all()` at the top,
+/// which removes *all* previously-registered shortcuts (including Esc).
+/// If the new registration fails after this point, the user will be left
+/// with no working hotkey at all — callers that need to roll back to the
+/// previous combo on failure must invoke this function again with the
+/// previous combo as a defensive measure.
 pub fn reregister(app: &AppHandle, combo: &str) -> Result<(), HotkeyError> {
     let manager = app.global_shortcut();
     // Best-effort unregister all. Some platforms fail here if nothing's registered.
     let _ = manager.unregister_all();
 
-    // Main hotkey — best effort. If parsing/registration fails, we still
-    // want to register the Esc fallback so the user can recover.
-    match parse(combo) {
+    // Main hotkey — capture the result so we can both log it and return it.
+    // Esc is still registered below as a best-effort fallback regardless of
+    // whether the main hotkey succeeded.
+    let main_result: Result<(), HotkeyError> = match parse(combo) {
         Ok(shortcut) => {
             let app_clone = app.clone();
             let combo_for_log = combo.to_string();
-            if let Err(e) = manager.on_shortcut(shortcut, move |_app, _sc, event| {
-                if event.state() == ShortcutState::Pressed {
-                    tracing::info!("hotkey pressed (main: {combo_for_log})");
-                    let handle = app_clone.state::<PipelineHandle>();
-                    handle.toggle();
-                }
-            }) {
-                tracing::error!("failed to register main hotkey {combo:?}: {e}");
-            } else {
-                tracing::info!("hotkey registered: {combo}");
-            }
+            manager
+                .on_shortcut(shortcut, move |_app, _sc, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        tracing::info!("hotkey pressed (main: {combo_for_log})");
+                        let handle = app_clone.state::<PipelineHandle>();
+                        handle.toggle();
+                    }
+                })
+                .map_err(|e| HotkeyError::Registration(e.to_string()))
         }
         Err(e) => {
             tracing::error!("main hotkey {combo:?} is invalid: {e}");
+            Err(e)
+        }
+    };
+
+    // Log OS-level registration failures (parse failures already logged above).
+    // Kept as a separate branch so log scrapers / Console.app filters that
+    // match the "failed to register main hotkey" string still work.
+    if let Err(ref e) = main_result {
+        if matches!(e, HotkeyError::Registration(_)) {
+            tracing::error!("failed to register main hotkey {combo:?}: {e}");
         }
     }
 
-    // Esc fallback — always register, regardless of main hotkey state.
+    // Esc fallback — always register, regardless of main hotkey state. Best
+    // effort: a missing Esc is annoying but not catastrophic (the user just
+    // loses their recovery path), so we log a warning rather than folding
+    // it into the main error.
     let app_clone = app.clone();
     if let Err(e) = manager.on_shortcut(
         Shortcut::new(None, Code::Escape),
@@ -63,7 +96,11 @@ pub fn reregister(app: &AppHandle, combo: &str) -> Result<(), HotkeyError> {
         tracing::info!("hotkey registered: Escape (fallback)");
     }
 
-    Ok(())
+    if main_result.is_ok() {
+        tracing::info!("hotkey registered: {combo}");
+    }
+
+    main_result
 }
 
 /// Parse a combo string like "AltRight", "Cmd+Shift+Space", "Ctrl+Alt+F1".
@@ -262,6 +299,54 @@ mod tests {
                 crate::settings::UNREGISTERABLE_ON_MACOS.contains(&key),
                 "{key:?} must be in UNREGISTERABLE_ON_MACOS"
             );
+        }
+    }
+
+    // ----- #11 follow-up: surface parse / OS-registration errors -----
+
+    /// The `Registration` variant exists, carries a message, and `Display`
+    /// produces a stable string the UI / log scrapers can grep for. The
+    /// actual OS path requires a Tauri `AppHandle` so we can't exercise
+    /// it from a unit test (per the assignment's guidance), but the
+    /// contract of the error type is fully testable.
+    #[test]
+    fn registration_error_display_is_stable() {
+        let e = HotkeyError::Registration("hotkey already registered".into());
+        let msg = e.to_string();
+        assert!(msg.contains("failed to register"), "got {msg:?}");
+        assert!(msg.contains("hotkey already registered"), "got {msg:?}");
+    }
+
+    /// `Display` output is what callers (`cmd_update_settings`,
+    /// `cmd_reload_settings`) embed in their returned `Err(String)`.
+    /// Make sure none of the variants produce an empty string — the
+    /// previous bug was that the error branch was unreachable because
+    /// `reregister` always returned `Ok(())`, so this pins down the
+    /// minimum bar for the error messages we now do surface.
+    #[test]
+    fn all_error_variants_render_non_empty() {
+        for e in [
+            HotkeyError::InvalidCombo("Cmd+".into()),
+            HotkeyError::UnknownKey("Mxyzptlk".into()),
+            HotkeyError::Registration("permission denied".into()),
+        ] {
+            assert!(!e.to_string().is_empty(), "{e:?} must render a message");
+        }
+    }
+
+    /// `parse` is the boundary that decides between `InvalidCombo` /
+    /// `UnknownKey` and the new `Registration` variant. `parse`
+    /// failures never produce `Registration`; `Registration` is only
+    /// constructed by `reregister` after `parse` returns `Ok`.
+    /// Pin that down so a future refactor doesn't accidentally widen
+    /// the type. (OS-side failures aren't directly unit-testable
+    /// without a Tauri runtime, so we test the type relationship here.)
+    #[test]
+    fn parse_errors_are_never_registration() {
+        for bad in ["", "Cmd+", "Cmd+NotAKey", "Cmd", "Cmd+A+B"] {
+            if let Err(HotkeyError::Registration(_)) = parse(bad) {
+                panic!("parse({bad:?}) returned Registration; expected InvalidCombo/UnknownKey")
+            }
         }
     }
 }

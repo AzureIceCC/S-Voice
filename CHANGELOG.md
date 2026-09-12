@@ -4,7 +4,106 @@ All notable changes to S-Voice are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] — 2026-08-23 — initial release
+## [0.2.0] — 2026-09-12
+
+### Added
+- Apple SpeechAnalyzer transcription on macOS 26, selected explicitly and used
+  by default, while retaining local MLX Whisper as an offline backend. Backend
+  failures are surfaced directly and never trigger an automatic fallback.
+- Speech-recognition permission metadata, a bundled Swift helper, capability
+  probes, and a reserved Apple Intelligence availability interface.
+
+### Changed
+- Default local polish model is `qwen3.5:2b-q4_K_M`.
+- Completed #20 hot-path work: allocation-free callback conversion/downmixing,
+  rolling RMS accumulation, pooled HTTP clients, event-driven settings status,
+  and non-blocking STT process management. Bundled-app trials measured Apple
+  STT at 224-378ms and total post-recording processing at 1.14-1.57s across
+  consecutive 2.9-8.9s recordings.
+
+### Fixed
+- Transactional settings and hotkey updates, safe external-edit handling,
+  bounded STT requests, coherent CoreAudio configuration, acknowledged capture
+  startup, responsive MLX lifecycle operations, and reliable paste failure
+  reporting (#13-#19).
+
+### Detailed fixes
+- **#13: transactional settings updates and consistent default hotkey** — UI
+  updates now validate/register a changed hotkey, persist a candidate settings
+  object, and only then replace shared runtime state. Registration errors,
+  persistence failures, and external-edit conflicts restore the previous OS
+  hotkey without overwriting the externally changed file; rollback failures
+  are surfaced explicitly. `save_to` now distinguishes written, unchanged, and
+  conflict outcomes. Six transaction tests cover all success/failure paths.
+  The settings form's empty and clear fallbacks now use `Cmd+[` to match Rust.
+- **#20 phase 1: lower hot-path overhead** — audio callbacks now convert and
+  downmix F32/I16/U16 input directly into the mono capture buffer, avoiding a
+  temporary allocation for every callback. A fixed 480-sample ring with a
+  running sum of squares replaces repeated `Vec::remove(0)` and full-window
+  rescans; a release microbenchmark measured its window maintenance at
+  14.9-17.2x faster with identical RMS output. Ollama requests now share a
+  connection-pooled client, the settings state badge uses pipeline events
+  instead of polling twice per second, and STT service scripts are awaited on
+  blocking workers rather than async/UI callback threads. Real-device aggregate
+  validation and closure are recorded in v0.2.0 above.
+- **#18: non-blocking, serialized STT model lifecycle** — synchronous MLX load,
+  inference, warmup, and unload operations now run through worker threads and a
+  single lifecycle lock. FastAPI's event loop can continue serving health and
+  configuration requests during inference, while idle and forced unload cannot
+  release the model underneath an active transcription. A lightweight state
+  snapshot reports loading/transcribing/unloaded status without waiting for the
+  model lock. Fake-backend concurrency tests cover overlapping health,
+  prewarm, transcription, forced unload, and idle unload operations.
+- **#16/#17: reliable paste-path selection and failure reporting** — the macOS
+  output path now checks `AXIsProcessTrusted()` without prompting before using
+  CGEventPost, and immediately selects the osascript fallback when S-Voice is
+  not trusted. The fallback now captures the child process output and treats a
+  non-zero exit as a paste failure, preserving up to 512 stderr characters for
+  diagnosis. Unit tests cover success, non-zero exit, truncation, and spawn
+  failure; bundled-app permission-state testing remains a manual follow-up.
+- **#15/#19: coherent audio configuration and acknowledged startup** — audio
+  capture now keeps the selected sample format, channels, and sample rate as
+  one configuration instead of combining a supported range with the device's
+  potentially different default format. The preferred 16 kHz rate is clamped
+  to the selected device range. `Cmd::Start` also returns the worker's actual
+  stream-build/play result through a bounded channel, so the UI enters
+  `Recording` only after the microphone stream is live. New tests cover config
+  selection, rate bounds, worker failure, timeout, and disconnection.
+- **#14: bounded STT requests** — the Rust STT client now reuses a single
+  connection-pooled `reqwest::Client`, limits connection setup to 2 seconds,
+  and caps a full transcription at 45 seconds. A wedged MLX request now exits
+  through the pipeline's existing error state instead of remaining in
+  `Processing` forever. Health checks use a 3-second cap; predictive prewarm
+  keeps its 20-second cap. A stalled local TCP test covers timeout handling.
+- **#11: race between external `settings.json` edits and the
+  `RunEvent::Exit` save-back** — previously, when a user (or an
+  automation script) edited `settings.json` while s-voice was alive
+  (e.g. swapping `ollama_model` from `9b-mlx` to `2b`) and then quit
+  via Cmd+Q, the exit-time `Settings::save()` clobbered the external
+  edit by writing the stale in-memory snapshot back to disk. Two-layer
+  fix in `Settings::save_to`:
+  1. **Byte-level diff-skip** — if `to_string_pretty(self)` matches
+     the on-disk file, skip the write. `to_string_pretty` is
+     deterministic so byte-level comparison is stable; `trim_end`
+     tolerates a trailing-newline difference.
+  2. **External-edit detection** — `Settings.last_known_disk`
+     (`#[serde(skip)]`) records what `load()` or a previous
+     `save_to()` last saw on disk. If the current disk content
+     differs from that snapshot, `save_to` refuses to write and
+     logs a warning; the user can reconcile via the new
+     "重新加载" button in the settings window, which calls
+     `cmd_reload_settings` to refresh the in-memory state from disk.
+  3. **`Settings::save` is now `&mut self`** (was `&self`); callers
+     that need to mutate before saving (`cmd_update_settings`,
+     `tray::debug_toggle`, the `RunEvent::Exit` backstop) all hold
+     a write lock for the duration. 4 new unit tests pin the
+     behaviour: layer-1 skip, layer-1 write-on-change, layer-2
+     external-edit preservation, and reload-after-edit.
+- **Settings UI "重新加载" button** — invokes `cmd_reload_settings`
+  which re-reads `settings.json` and applies the new hotkey / debug
+  flag, then refreshes the form fields. Shared `applySettings()`
+  helper between the initial load and reload paths keeps them in
+  sync.
 
 ### Fixed
 
@@ -23,6 +122,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ends before the text is on the clipboard. Per-stage timing
   (`paste timing: clipboard=… cgevent=…`) and a `turn timing` summary
   are now logged on every turn.
+
+### Predictive model prewarming (2026-08-29)
+
+Added background prewarming for both ASR and LLM models so the
+cold-start cost is hidden during the user's speech window.
+
+**STT bridge** (`stt/stt_server.py`):
+- New `POST /prewarm` endpoint — idempotent. If the model is unloaded
+  it kicks off a background thread to reload it. Returns
+  `already_loaded` / `loading` / `disabled`.
+- New `MLXAudioBackend.unload()` — drops the in-memory reference,
+  `gc.collect()`, and `mlx.core.metal.clear_cache()` so the MPS
+  allocator pool actually releases.
+- Background idle-unloader thread: every 60s checks if the model
+  has been idle for > `STT_IDLE_UNLOAD_SEC` (default 30min), then
+  unloads. New `/transcribe` calls reset the idle clock.
+- `/health` now reports `model_loaded` and `idle_sec` so the
+  client can see exactly what state the bridge is in.
+
+**LLM (Ollama)** (`polish.rs`):
+- New `polish::prewarm(model, keep_alive)` — fire-and-forget
+  `/api/generate` with empty prompt + `num_predict: 1`. Nudges
+  Ollama to (re)load the model without blocking the call site.
+
+**Client** (`pipeline.rs::start_recording`):
+- When the user presses the global hotkey, immediately spawn two
+  background tasks: `stt_client::prewarm()` and (if polish is
+  enabled) `polish::prewarm()`. Both have a 500ms hard timeout
+  and swallow all errors, so the press-to-record path is never
+  blocked by Ollama or the STT bridge.
+- Typical timing: STT load 5-15s, polish load 165s (Ollama MLX cold
+  boot). With prewarming, the user is still speaking during the
+  load, so by the time the recording stops the model is hot.
 
 ### Changed
 - **CGEventPost path for paste** — when Accessibility is granted, `output::paste`
@@ -177,7 +309,7 @@ The model is now `qwen3.5:2b` (GGUF, 2.7 GB) on the user side,
 chosen to avoid the MLX-vs-MLX Metal allocator pool contention that
 made `qwen3.5:9b-mlx` slow STT 6x (11.4s vs 1.7s median).
 
-## [0.1.0] — initial feature set
+## [0.1.0] — 2026-08-23 — initial release
 
 - Tauri 2 desktop app for local AI voice input.
 - Pipeline: mic (cpal) → WAV bytes → STT bridge (HTTP) → text →

@@ -1,13 +1,15 @@
 # S-Voice
 
-Local AI voice input for macOS. Press a global hotkey, speak, get polished text
-inserted at the cursor. Everything runs on-device — no audio leaves your machine.
+AI voice input for macOS. Press a global hotkey, speak, get polished text
+inserted at the cursor. Apple SpeechAnalyzer is the default on macOS 26 and
+newer; local Whisper remains available as an explicitly selected offline backend.
 
 Inspired by [Typeless](https://typeless.com), built from scratch with local-first
 components:
 
-- **STT** — MLX belle-whisper-large-v3-turbo-zh (Chinese-tuned Whisper, Apple Silicon accelerated)
-- **Polish** — Ollama qwen3.5:9b-mlx (local LLM, 30-minute auto-unload)
+- **Default STT** — Apple SpeechAnalyzer on-device recognition on macOS 26
+- **Optional STT** — MLX belle-whisper-large-v3-turbo-zh (explicit offline selection; no automatic fallback)
+- **Polish** — Ollama qwen3.5:2b-q4_K_M (local LLM, 30-minute auto-unload)
 - **UI** — Tauri 2 (Rust backend, vanilla HTML/JS frontend)
 
 ## Architecture
@@ -73,7 +75,7 @@ s-voice/
 # Already at ~/.cache/huggingface/hub/models--mlx-community--belle-whisper-large-v3-turbo-zh-fp16
 
 # Pull Ollama model
-ollama pull qwen3.5:9b-mlx
+ollama pull qwen3.5:2b-q4_K_M
 ```
 
 ### Launch
@@ -89,18 +91,21 @@ cargo run
 ./target/debug/s-voice
 ```
 
-The Tauri app **does not auto-start the STT bridge** in v1. Start it manually
-before using the app. (A future version can launch the bridge as a child process.)
+The STT bridge is only needed when the local Whisper backend is selected. The
+app checks it at startup and attempts to run `stt/start_stt.sh`; a source checkout
+or an explicit `STT_HOME` is currently required for that script.
 
 ### First launch (macOS permissions)
 
 1. **Microphone** — macOS prompts on first recording. Approve.
 2. **Accessibility** — required for global hotkey + Cmd+V paste.
    System Settings → Privacy & Security → Accessibility → enable S-Voice.
+3. **Speech Recognition** — macOS may request access when first selecting the
+   Apple backend. Failures do not switch to local Whisper.
 
 ## Default hotkey
 
-`Cmd+Shift+Space` — toggle (press once to start, press again to stop).
+`Cmd+[` — toggle (press once to start, press again to stop).
 
 Change in the Settings window: click "录制", press your combo, save.
 
@@ -112,16 +117,31 @@ press hotkey
 press hotkey again
   → state: processing (floating panel shows "处理中...")
   → record WAV via cpal (16kHz mono, on a dedicated worker thread)
-  → POST /transcribe on STT bridge
+  → transcribe with the explicitly selected Apple Speech or local Whisper backend
   → POST /api/generate on Ollama (keep_alive=30m)
   → write final text to clipboard
-  → osascript: keystroke "v" using command down
+  → CGEventPost Cmd+V (osascript fallback when Accessibility is unavailable)
   → state: idle (floating panel hides)
 ```
 
 Errors emit Tauri events; the settings window shows the last error.
 
-## Performance (M-series, MLX Whisper, qwen3.5:9b-mlx)
+## Performance
+
+Bundled-app validation on 2026-09-12 with Apple SpeechAnalyzer and
+`qwen3.5:2b-q4_K_M` local polish:
+
+| Stage | Observed time |
+|---|---:|
+| Apple SpeechAnalyzer | 224-378ms |
+| Local 2B Q4 polish | 769ms-1.19s |
+| CGEventPost paste | 2-22ms |
+| **Total after recording** | **1.14-1.57s** |
+
+The three consecutive recordings were 2.9s, 3.0s, and 8.9s long and completed
+without capture, pipeline, or paste errors.
+
+### Legacy local Whisper baseline
 
 实测数据（4 段录音，5-6s 中文音频，2026-08-22 `Cmd+[` hotkey 路径）：
 
@@ -139,15 +159,18 @@ Errors emit Tauri events; the settings window shows the last error.
 Memory when everything is warm: ~12GB total (macOS baseline + Ollama ~6GB +
 STT bridge ~3GB + Tauri ~250MB).
 
-## Known limitations (v0.1)
+## Known limitations (v0.2)
 
 - Mic + Accessibility permissions must be granted manually on first launch
 - Cmd+V paste doesn't work in some contexts (terminal, password fields, some
   Electron apps) — Typeless has the same limitation
 - macOS only; Windows / Linux builds are untested
-- The STT bridge isn't auto-spawned by the app; run `./stt/start_stt.sh` first
-- Custom dictionary, per-app style, translation mode, floating history — all
-  planned for v0.2+
+- The installed app cannot yet bundle the Python/MLX runtime; local Whisper may
+  require `STT_HOME` or manually running `./stt/start_stt.sh` from a checkout.
+- Apple Speech requires macOS 26; Apple Intelligence is capability-reserved but
+  unavailable on devices Apple reports as ineligible.
+- Custom dictionary, per-app style, translation mode, and floating history are
+  future work.
 
 ## Development
 

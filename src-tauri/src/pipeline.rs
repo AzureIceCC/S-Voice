@@ -187,11 +187,11 @@ impl PipelineActor {
             self.recreate_recorder();
         }
         let recorder = self.recorder.as_mut().map_err(|e| e.clone())?;
-        if recorder.start().is_err() {
+        if let Err(e) = recorder.start() {
             // A previous Stop may have wedged the audio worker (recv_timeout
             // returned WorkerGone), so `cmd_tx.send(Start)` is permanently
             // broken on this controller. Recreate and retry once.
-            tracing::warn!("mic start failed; recreating audio controller and retrying");
+            tracing::warn!("mic start failed ({e}); recreating audio controller and retrying");
             self.recreate_recorder();
             let recorder = self.recorder.as_mut().map_err(|e| e.clone())?;
             recorder
@@ -203,6 +203,30 @@ impl PipelineActor {
         // The floating panel is persistent (visible: true in tauri.conf);
         // we just flip its state in JS. No need to .show() here.
         tracing::info!("recording started");
+        // Predictive prewarm: kick the STT bridge to (re)load its model
+        // in the background. While the user is speaking (5-10s) the
+        // model loads, so the subsequent /transcribe hits a warm model.
+        // Fire-and-forget — a failure here just means we eat the cold-
+        // start cost the next time around, same as before.
+        if self.settings.read().stt_backend == "local_whisper" {
+            tokio::spawn(async move {
+                crate::stt_client::prewarm().await;
+            });
+        }
+        // Same idea for the polish model: nudge Ollama to (re)load it
+        // now so the model is hot by the time we run polish 5-10s
+        // later. Skipped if polish is disabled in settings — no point
+        // loading a model we won't use.
+        let polish_enabled = self.settings.read().polish_enabled;
+        if polish_enabled {
+            let (model, keep_alive) = {
+                let s = self.settings.read();
+                (s.ollama_model.clone(), s.ollama_keep_alive.clone())
+            };
+            tokio::spawn(async move {
+                crate::polish::prewarm(&model, &keep_alive).await;
+            });
+        }
         Ok(())
     }
 
@@ -277,9 +301,10 @@ impl PipelineActor {
         let process_start = std::time::Instant::now();
 
         // Read settings snapshot.
-        let (lang, ollama_model, keep_alive, polish_enabled, custom_prompt) = {
+        let (stt_backend, lang, ollama_model, keep_alive, polish_enabled, custom_prompt) = {
             let s = self.settings.read();
             (
+                s.stt_backend.clone(),
                 s.language.clone(),
                 s.ollama_model.clone(),
                 s.ollama_keep_alive.clone(),
@@ -293,16 +318,29 @@ impl PipelineActor {
         // final re-alignment, so we stick to the deterministic single-shot
         // `transcribe()` call. Latency is ~4-5s for the large-v3 Chinese
         // model; v0.2 will revisit streaming via faster-whisper.
-        let raw_text = match crate::stt_client::transcribe(wav, &lang).await {
-            Ok(r) => r.text,
-            Err(e) => {
-                self.set_error(format!("STT failed: {e}"));
-                return;
+        let raw_text = if stt_backend == "apple_speech" {
+            match crate::apple_speech::transcribe(wav, &lang).await {
+                Ok(text) => text,
+                Err(e) => {
+                    // Backend choice is explicit. Do not hide Apple/network/
+                    // permission failures by silently sending audio to MLX.
+                    self.set_error(format!("Apple Speech failed: {e}"));
+                    return;
+                }
+            }
+        } else {
+            match crate::stt_client::transcribe(wav, &lang).await {
+                Ok(r) => r.text,
+                Err(e) => {
+                    self.set_error(format!("local Whisper failed: {e}"));
+                    return;
+                }
             }
         };
         let stt_duration = process_start.elapsed();
         tracing::info!(
-            "STT took {:?} ({} chars) -> {raw_text:?}",
+            "STT backend={} took {:?} ({} chars) -> {raw_text:?}",
+            stt_backend,
             stt_duration,
             raw_text.chars().count()
         );
@@ -429,13 +467,17 @@ fn is_filler_char(c: char) -> bool {
         || c == '欸'
         || c == '呣'
         || c == '唔'
-        || c == 'u' || c == 'U'
-        || c == 'h' || c == 'H'
-        || c == 'm' || c == 'M'
+        || c == 'u'
+        || c == 'U'
+        || c == 'h'
+        || c == 'H'
+        || c == 'm'
+        || c == 'M'
 }
 
 fn is_punctuation(c: char) -> bool {
-    matches!(c,
+    matches!(
+        c,
         // ASCII punctuation
         '.' | ',' | '!' | '?' | ';' | ':' | '"' | '\'' | '(' | ')' | '[' | ']'
             | '{' | '}' | '-' | '/' | '\\' | '|' | '@' | '#' | '$' | '%' | '^'
@@ -510,7 +552,9 @@ mod tests {
     /// as "real content".
     #[test]
     fn punctuation_helper_catches_all() {
-        for c in ['.', ',', '!', '?', '。', '，', '！', '？', '…', '—', '"', '"', '\'', '\'', '（', '）'] {
+        for c in [
+            '.', ',', '!', '?', '。', '，', '！', '？', '…', '—', '"', '"', '\'', '\'', '（', '）',
+        ] {
             assert!(is_punctuation(c), "expected {c:?} to be punctuation");
         }
     }

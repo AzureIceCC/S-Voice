@@ -34,7 +34,16 @@
     </section>
 
     <section>
-      <label>STT 模型</label>
+      <label>语音识别后端</label>
+      <select id="stt-backend">
+        <option value="apple_speech" selected>Apple SpeechAnalyzer（系统本地）</option>
+        <option value="local_whisper">本地 Whisper（离线）</option>
+      </select>
+      <p class="hint">后端选择是显式的；所选后端失败时不会自动切换。SpeechAnalyzer 使用 macOS 管理的本地语音模型。</p>
+    </section>
+
+    <section>
+      <label>本地 Whisper 模型</label>
       <input type="text" id="stt-model">
     </section>
 
@@ -88,6 +97,7 @@
 
     <section class="actions">
       <button id="save" class="btn-primary">保存</button>
+      <button id="reload" class="btn-secondary">从磁盘重新加载</button>
       <button id="test-stt" class="btn-secondary">测试 STT 连接</button>
       <button id="test-polish" class="btn-secondary">测试润色</button>
     </section>

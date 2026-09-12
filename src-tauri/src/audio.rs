@@ -6,7 +6,7 @@
 //! - commands and responses travel over `std::sync::mpsc`
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, Stream, StreamConfig};
+use cpal::{SampleFormat, SampleRate, Stream, StreamConfig, SupportedStreamConfigRange};
 use hound::{SampleFormat as HoundFormat, WavSpec, WavWriter};
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -17,6 +17,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 const LEVEL_WINDOW: usize = 480; // ~30ms at 16kHz
+const AUDIO_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const TARGET_SAMPLE_RATE: u32 = 16000;
 
 /// Severity of an `AudioController` construction failure. Drives whether the
 /// pipeline should keep trying to rebuild the controller on subsequent
@@ -48,28 +50,88 @@ pub enum AudioError {
     WorkerSpawn(String),
     #[error("audio worker disconnected")]
     WorkerGone,
+    #[error("audio worker did not respond to {0} within the timeout")]
+    WorkerTimeout(&'static str),
     #[error("audio worker init failed: {0}")]
     WorkerInit(String),
+}
+
+#[derive(Clone, Debug)]
+struct SelectedInputConfig {
+    config: StreamConfig,
+    sample_format: SampleFormat,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InputConfigCandidate {
+    sample_format: SampleFormat,
+    channels: u16,
+    min_sample_rate: u32,
+    max_sample_rate: u32,
 }
 
 struct WorkerState {
     stream: Option<Stream>,
     samples: Vec<f32>,
-    sample_rate: u32,
+    input_config: SelectedInputConfig,
     /// Original channel count from cpal. Kept for logging/diagnostics only;
-    /// the actual `samples` Vec is already mono-downmixed by `on_f32`, so
+    /// the actual `samples` Vec is already mono-downmixed by `on_input`, so
     /// downstream code must NOT re-downmix (a previous version did, which
     /// halved the captured duration on stereo input devices).
     #[allow(dead_code)]
     channels: u16,
-    level_window: Vec<f32>,
+    level_meter: LevelMeter,
     // Shared buffers for the audio callback (which is on a different thread).
     shared_samples: Option<std::sync::Arc<parking_lot::Mutex<Vec<f32>>>>,
-    shared_level_window: Option<std::sync::Arc<parking_lot::Mutex<Vec<f32>>>>,
+    shared_level_meter: Option<std::sync::Arc<parking_lot::Mutex<LevelMeter>>>,
+}
+
+struct LevelMeter {
+    values: [f32; LEVEL_WINDOW],
+    cursor: usize,
+    len: usize,
+    sum_sq: f32,
+}
+
+impl LevelMeter {
+    fn new() -> Self {
+        Self {
+            values: [0.0; LEVEL_WINDOW],
+            cursor: 0,
+            len: 0,
+            sum_sq: 0.0,
+        }
+    }
+
+    fn push(&mut self, sample: f32) {
+        if self.len < LEVEL_WINDOW {
+            self.len += 1;
+        } else {
+            let old = self.values[self.cursor];
+            self.sum_sq -= old * old;
+        }
+        self.values[self.cursor] = sample;
+        self.cursor = (self.cursor + 1) % LEVEL_WINDOW;
+        self.sum_sq += sample * sample;
+    }
+
+    fn rms(&self) -> f32 {
+        if self.len == 0 {
+            0.0
+        } else {
+            (self.sum_sq.max(0.0) / self.len as f32).sqrt()
+        }
+    }
+
+    fn clear(&mut self) {
+        self.cursor = 0;
+        self.len = 0;
+        self.sum_sq = 0.0;
+    }
 }
 
 enum Cmd {
-    Start,
+    Start(SyncSender<Result<(), AudioError>>),
     Stop(SyncSender<Result<Vec<u8>, AudioError>>),
     Shutdown,
 }
@@ -99,22 +161,12 @@ impl AudioController {
             Ok(it) => it.collect(),
             Err(e) => return Err((AudioError::Init(e.to_string()), AudioInitKind::Recoverable)),
         };
-        let config = match supported
-            .iter()
-            .find(|c| c.sample_format() == SampleFormat::F32)
-            .or(supported.first())
-        {
-            Some(c) => c,
-            None => {
-                return Err((
-                    AudioError::Init("no supported input config".into()),
-                    AudioInitKind::Recoverable,
-                ))
-            }
-        };
-
-        let sample_rate = config.min_sample_rate().0.max(16000);
-        let channels = config.channels();
+        let input_config = select_input_config(&supported).ok_or_else(|| {
+            (
+                AudioError::Init("no supported input config".into()),
+                AudioInitKind::Recoverable,
+            )
+        })?;
 
         let (cmd_tx, cmd_rx) = channel::<Cmd>();
         let level = Arc::new(AtomicU32::new(0));
@@ -129,7 +181,7 @@ impl AudioController {
         let join = thread::Builder::new()
             .name("audio-worker".into())
             .spawn(move || {
-                worker_main(cmd_rx, level_w, device, sample_rate, channels);
+                worker_main(cmd_rx, level_w, device, input_config);
                 // Drop the done sender here so the controller's
                 // `recv_timeout` unblocks with `Disconnected`.
                 drop(done_tx);
@@ -151,11 +203,12 @@ impl AudioController {
     }
 
     pub fn start(&self) -> Result<(), AudioError> {
+        let (rsp_tx, rsp_rx) = std::sync::mpsc::sync_channel(1);
         self.cmd_tx
-            .send(Cmd::Start)
+            .send(Cmd::Start(rsp_tx))
             .map_err(|_| AudioError::WorkerGone)?;
         tracing::info!("audio: start command sent to worker");
-        Ok(())
+        receive_worker_response(rsp_rx, AUDIO_COMMAND_TIMEOUT, "Start")
     }
 
     pub fn stop(&self) -> Result<Vec<u8>, AudioError> {
@@ -164,14 +217,7 @@ impl AudioController {
             .send(Cmd::Stop(rsp_tx))
             .map_err(|_| AudioError::WorkerGone)?;
         // Bound the wait so a stuck worker can't deadlock the pipeline.
-        match rsp_rx.recv_timeout(std::time::Duration::from_secs(3)) {
-            Ok(r) => r,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                tracing::error!("audio worker did not respond to Stop within 3s; forcing error");
-                Err(AudioError::WorkerGone)
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(AudioError::WorkerGone),
-        }
+        receive_worker_response(rsp_rx, AUDIO_COMMAND_TIMEOUT, "Stop")
     }
 
     pub fn level(&self) -> f32 {
@@ -236,15 +282,62 @@ impl Drop for AudioController {
     }
 }
 
+fn receive_worker_response<T>(
+    rsp_rx: Receiver<Result<T, AudioError>>,
+    timeout: Duration,
+    operation: &'static str,
+) -> Result<T, AudioError> {
+    match rsp_rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            tracing::error!(
+                "audio worker did not respond to {operation} within {timeout:?}; forcing error"
+            );
+            Err(AudioError::WorkerTimeout(operation))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(AudioError::WorkerGone),
+    }
+}
+
+fn select_input_config(ranges: &[SupportedStreamConfigRange]) -> Option<SelectedInputConfig> {
+    let candidates: Vec<_> = ranges
+        .iter()
+        .map(|range| InputConfigCandidate {
+            sample_format: range.sample_format(),
+            channels: range.channels(),
+            min_sample_rate: range.min_sample_rate().0,
+            max_sample_rate: range.max_sample_rate().0,
+        })
+        .collect();
+    let selected = select_candidate(&candidates)?;
+    let sample_rate = TARGET_SAMPLE_RATE
+        .max(selected.min_sample_rate)
+        .min(selected.max_sample_rate);
+    Some(SelectedInputConfig {
+        config: StreamConfig {
+            channels: selected.channels,
+            sample_rate: SampleRate(sample_rate),
+            buffer_size: cpal::BufferSize::Default,
+        },
+        sample_format: selected.sample_format,
+    })
+}
+
+fn select_candidate(candidates: &[InputConfigCandidate]) -> Option<InputConfigCandidate> {
+    candidates
+        .iter()
+        .find(|candidate| candidate.sample_format == SampleFormat::F32)
+        .or_else(|| candidates.first())
+        .copied()
+}
+
 fn worker_main(
     cmd_rx: Receiver<Cmd>,
     level: Arc<AtomicU32>,
     device: cpal::Device,
-    sample_rate: u32,
-    channels: u16,
+    input_config: SelectedInputConfig,
 ) {
-    let mut state: Option<WorkerState> = match build_stream(&device, &level, sample_rate, channels)
-    {
+    let mut state: Option<WorkerState> = match build_stream(input_config) {
         Ok(s) => Some(s),
         Err(e) => {
             tracing::error!("audio worker init failed: {e}");
@@ -254,12 +347,15 @@ fn worker_main(
 
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
-            Cmd::Start => {
-                if let Some(s) = state.as_mut() {
-                    if let Err(e) = start_capture(s, &device, sample_rate, channels, &level) {
-                        tracing::error!("start failed: {e}");
-                    }
+            Cmd::Start(rsp) => {
+                let result = match state.as_mut() {
+                    Some(s) => start_capture(s, &device, &level),
+                    None => Err(AudioError::WorkerInit("recorder not initialized".into())),
+                };
+                if let Err(e) = &result {
+                    tracing::error!("start failed: {e}");
                 }
+                let _ = rsp.send(result);
             }
             Cmd::Stop(rsp) => {
                 let result = match state.as_mut() {
@@ -273,37 +369,29 @@ fn worker_main(
     }
 }
 
-fn build_stream(
-    _device: &cpal::Device,
-    _level: &Arc<AtomicU32>,
-    _sample_rate: u32,
-    _channels: u16,
-) -> Result<WorkerState, AudioError> {
+fn build_stream(input_config: SelectedInputConfig) -> Result<WorkerState, AudioError> {
     // We just allocate state here; the actual stream is built on Start
     // so the worker can survive temporary stream errors.
     Ok(WorkerState {
         stream: None,
-        samples: Vec::with_capacity(_sample_rate as usize * 30),
-        sample_rate: _sample_rate,
-        channels: _channels,
-        level_window: Vec::with_capacity(LEVEL_WINDOW),
+        samples: Vec::with_capacity(input_config.config.sample_rate.0 as usize * 30),
+        channels: input_config.config.channels,
+        input_config,
+        level_meter: LevelMeter::new(),
         shared_samples: None,
-        shared_level_window: None,
+        shared_level_meter: None,
     })
 }
 
 fn start_capture(
     state: &mut WorkerState,
     device: &cpal::Device,
-    sample_rate: u32,
-    channels: u16,
     level: &Arc<AtomicU32>,
 ) -> Result<(), AudioError> {
-    let config = StreamConfig {
-        channels,
-        sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Default,
-    };
+    let config = state.input_config.config.clone();
+    let sample_format = state.input_config.sample_format;
+    let sample_rate = config.sample_rate.0;
+    let channels = config.channels;
 
     let level_w = Arc::clone(level);
     let err_fn = |err| tracing::error!("cpal stream error: {err}");
@@ -314,29 +402,27 @@ fn start_capture(
         sample_rate as usize * 30,
     )));
     let samples_w = std::sync::Arc::clone(&samples);
-    let level_window =
-        std::sync::Arc::new(parking_lot::Mutex::new(Vec::with_capacity(LEVEL_WINDOW)));
-    let level_window_w = std::sync::Arc::clone(&level_window);
+    let level_meter = std::sync::Arc::new(parking_lot::Mutex::new(LevelMeter::new()));
+    let level_meter_w = std::sync::Arc::clone(&level_meter);
 
-    let stream = match device
-        .default_input_config()
-        .map_err(|e| AudioError::Init(e.to_string()))?
-        .sample_format()
-    {
+    let stream = match sample_format {
         SampleFormat::F32 => device.build_input_stream(
             &config,
-            move |data: &[f32], _| on_f32(&samples_w, &level_window_w, &level_w, data, channels),
+            move |data: &[f32], _| {
+                on_input(&samples_w, &level_meter_w, &level_w, data, channels, |s| s)
+            },
             err_fn,
             None,
         ),
         SampleFormat::I16 => {
             let samples_w = std::sync::Arc::clone(&samples);
-            let level_window_w = std::sync::Arc::clone(&level_window);
+            let level_meter_w = std::sync::Arc::clone(&level_meter);
             device.build_input_stream(
                 &config,
                 move |data: &[i16], _| {
-                    let f: Vec<f32> = data.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
-                    on_f32(&samples_w, &level_window_w, &level_w, &f, channels);
+                    on_input(&samples_w, &level_meter_w, &level_w, data, channels, |s| {
+                        s as f32 / i16::MAX as f32
+                    });
                 },
                 err_fn,
                 None,
@@ -344,15 +430,13 @@ fn start_capture(
         }
         SampleFormat::U16 => {
             let samples_w = std::sync::Arc::clone(&samples);
-            let level_window_w = std::sync::Arc::clone(&level_window);
+            let level_meter_w = std::sync::Arc::clone(&level_meter);
             device.build_input_stream(
                 &config,
                 move |data: &[u16], _| {
-                    let f: Vec<f32> = data
-                        .iter()
-                        .map(|s| (*s as f32 - 32768.0) / 32768.0)
-                        .collect();
-                    on_f32(&samples_w, &level_window_w, &level_w, &f, channels);
+                    on_input(&samples_w, &level_meter_w, &level_w, data, channels, |s| {
+                        (s as f32 - 32768.0) / 32768.0
+                    });
                 },
                 err_fn,
                 None,
@@ -366,10 +450,10 @@ fn start_capture(
 
     // Stash the shared buffers into the WorkerState so Stop can drain them.
     state.samples = Vec::new();
-    state.level_window.clear();
+    state.level_meter.clear();
     state.stream = Some(stream);
     state.shared_samples = Some(samples);
-    state.shared_level_window = Some(level_window);
+    state.shared_level_meter = Some(level_meter);
     Ok(())
 }
 
@@ -381,14 +465,14 @@ fn stop_capture(state: &mut WorkerState) -> Result<Vec<u8>, AudioError> {
     } else {
         std::mem::take(&mut state.samples)
     };
-    state.shared_level_window = None;
-    state.level_window.clear();
+    state.shared_level_meter = None;
+    state.level_meter.clear();
 
     if samples.is_empty() {
         return Ok(Vec::new());
     }
 
-    // `samples` is already mono-downmixed by `on_f32` (the audio callback
+    // `samples` is already mono-downmixed by `on_input` (the audio callback
     // averages per-frame into a flat `Vec<f32>`). Do NOT re-downmix here
     // — doing so would halve the duration on stereo input devices.
     // Convert the f32 samples to 16-bit PCM with clamping, then encode.
@@ -396,7 +480,7 @@ fn stop_capture(state: &mut WorkerState) -> Result<Vec<u8>, AudioError> {
 
     let spec = WavSpec {
         channels: 1,
-        sample_rate: state.sample_rate,
+        sample_rate: state.input_config.config.sample_rate.0,
         bits_per_sample: 16,
         sample_format: HoundFormat::Int,
     };
@@ -412,41 +496,28 @@ fn stop_capture(state: &mut WorkerState) -> Result<Vec<u8>, AudioError> {
     Ok(buf.into_inner())
 }
 
-fn on_f32(
+fn on_input<T, F>(
     samples: &std::sync::Arc<parking_lot::Mutex<Vec<f32>>>,
-    level_window: &std::sync::Arc<parking_lot::Mutex<Vec<f32>>>,
+    level_meter: &std::sync::Arc<parking_lot::Mutex<LevelMeter>>,
     level: &Arc<AtomicU32>,
-    data: &[f32],
+    data: &[T],
     channels: u16,
-) {
-    // Downmix if multi-channel
-    let mono: Vec<f32> = if channels <= 1 {
-        data.to_vec()
-    } else {
-        let step = channels as usize;
-        data.chunks(step)
-            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
-            .collect()
-    };
-    {
-        let mut s = samples.lock();
-        s.extend_from_slice(&mono);
+    to_f32: F,
+) where
+    T: Copy,
+    F: Fn(T) -> f32,
+{
+    let channels = usize::from(channels.max(1));
+    let mut captured = samples.lock();
+    let mut meter = level_meter.lock();
+    for frame in data.chunks(channels) {
+        let mono = frame.iter().copied().map(&to_f32).sum::<f32>() / frame.len() as f32;
+        captured.push(mono);
+        meter.push(mono);
     }
-    let rms = {
-        let mut lw = level_window.lock();
-        for s in &mono {
-            if lw.len() >= LEVEL_WINDOW {
-                lw.remove(0);
-            }
-            lw.push(*s);
-        }
-        if lw.is_empty() {
-            0.0
-        } else {
-            let sum_sq: f32 = lw.iter().map(|x| x * x).sum();
-            (sum_sq / lw.len() as f32).sqrt()
-        }
-    };
+    let rms = meter.rms();
+    drop(meter);
+    drop(captured);
     // Light smoothing
     let prev = f32::from_bits(level.load(Ordering::Relaxed));
     let smoothed = prev * 0.5 + rms * 0.5;
@@ -465,6 +536,118 @@ fn f32_to_pcm16(samples: &[f32]) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn level_meter_matches_rolling_rms() {
+        let mut meter = LevelMeter::new();
+        let samples: Vec<f32> = (0..(LEVEL_WINDOW * 3 + 17))
+            .map(|i| ((i % 31) as f32 - 15.0) / 15.0)
+            .collect();
+
+        for (index, sample) in samples.iter().copied().enumerate() {
+            meter.push(sample);
+            let start = (index + 1).saturating_sub(LEVEL_WINDOW);
+            let expected = (samples[start..=index].iter().map(|x| x * x).sum::<f32>()
+                / (index + 1 - start) as f32)
+                .sqrt();
+            assert!((meter.rms() - expected).abs() < 0.000_01);
+        }
+    }
+
+    #[test]
+    fn input_callback_converts_and_downmixes_without_temporary_buffer() {
+        let samples = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let meter = Arc::new(parking_lot::Mutex::new(LevelMeter::new()));
+        let level = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
+
+        on_input(
+            &samples,
+            &meter,
+            &level,
+            &[i16::MAX, i16::MAX, 0, i16::MAX],
+            2,
+            |s| s as f32 / i16::MAX as f32,
+        );
+
+        assert_eq!(*samples.lock(), vec![1.0, 0.5]);
+        let expected_rms = ((1.0_f32 + 0.25) / 2.0).sqrt();
+        assert!((meter.lock().rms() - expected_rms).abs() < f32::EPSILON);
+    }
+
+    fn candidate(
+        sample_format: SampleFormat,
+        channels: u16,
+        min_sample_rate: u32,
+        max_sample_rate: u32,
+    ) -> InputConfigCandidate {
+        InputConfigCandidate {
+            sample_format,
+            channels,
+            min_sample_rate,
+            max_sample_rate,
+        }
+    }
+
+    #[test]
+    fn input_config_prefers_f32_without_mixing_in_default_format() {
+        let i16_default = candidate(SampleFormat::I16, 1, 8000, 48000);
+        let f32_supported = candidate(SampleFormat::F32, 2, 44100, 96000);
+
+        let selected = select_candidate(&[i16_default, f32_supported]).unwrap();
+
+        assert_eq!(selected.sample_format, SampleFormat::F32);
+        assert_eq!(selected.channels, 2);
+        assert_eq!(selected.min_sample_rate, 44100);
+    }
+
+    #[test]
+    fn selected_rate_is_clamped_to_supported_range() {
+        let below_16k = candidate(SampleFormat::F32, 1, 8000, 12000);
+        let above_16k = candidate(SampleFormat::F32, 1, 44100, 48000);
+
+        let low_rate = TARGET_SAMPLE_RATE
+            .max(below_16k.min_sample_rate)
+            .min(below_16k.max_sample_rate);
+        let high_rate = TARGET_SAMPLE_RATE
+            .max(above_16k.min_sample_rate)
+            .min(above_16k.max_sample_rate);
+
+        assert_eq!(low_rate, 12000);
+        assert_eq!(high_rate, 44100);
+    }
+
+    #[test]
+    fn worker_response_propagates_start_success_and_failure() {
+        let (success_tx, success_rx) = std::sync::mpsc::sync_channel(1);
+        success_tx.send(Ok(())).unwrap();
+        assert!(receive_worker_response(success_rx, Duration::from_millis(10), "Start").is_ok());
+
+        let (failure_tx, failure_rx) = std::sync::mpsc::sync_channel::<Result<(), AudioError>>(1);
+        failure_tx
+            .send(Err(AudioError::Play("test failure".into())))
+            .unwrap();
+        assert!(matches!(
+            receive_worker_response(failure_rx, Duration::from_millis(10), "Start"),
+            Err(AudioError::Play(message)) if message == "test failure"
+        ));
+    }
+
+    #[test]
+    fn worker_response_distinguishes_timeout_and_disconnect() {
+        let (_timeout_tx, timeout_rx) = std::sync::mpsc::sync_channel::<Result<(), AudioError>>(1);
+        assert!(matches!(
+            receive_worker_response(timeout_rx, Duration::from_millis(1), "Start"),
+            Err(AudioError::WorkerTimeout("Start"))
+        ));
+
+        let (disconnected_tx, disconnected_rx) =
+            std::sync::mpsc::sync_channel::<Result<(), AudioError>>(1);
+        drop(disconnected_tx);
+        assert!(matches!(
+            receive_worker_response(disconnected_rx, Duration::from_millis(10), "Start"),
+            Err(AudioError::WorkerGone)
+        ));
+    }
 
     /// Boundary values must round-trip through the i16 range without
     /// wrapping (i16::MAX + 1 wraps to i16::MIN if we forget to clamp).

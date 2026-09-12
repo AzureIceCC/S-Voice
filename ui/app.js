@@ -2,20 +2,27 @@
 
 const $ = (id) => document.getElementById(id);
 
+// Apply a Settings object to the form fields. Shared by the initial
+// load and the "reload from disk" button so they stay in sync.
+function applySettings(s) {
+  $('hotkey').value = s.hotkey || '';
+  $('language').value = s.language || 'zh';
+  $('stt-backend').value = s.stt_backend || 'apple_speech';
+  $('stt-model').value = s.stt_model || '';
+  $('ollama-model').value = s.ollama_model || '';
+  $('ollama-keepalive').value = s.ollama_keep_alive || '30m';
+  $('polish-enabled').checked = !!s.polish_enabled;
+  $('polish-prompt').value = s.polish_prompt || '';
+  // Streaming is always off for now (the on-radio is disabled). We still
+  // restore the saved value so it round-trips correctly when v0.2 lands.
+  $('streaming-' + (s.streaming_enabled ? 'on' : 'off')).checked = true;
+  $('debug').checked = !!s.debug;
+}
+
 async function loadSettings() {
   try {
     const s = await window.t.invoke('cmd_get_settings');
-    $('hotkey').value = s.hotkey || '';
-    $('language').value = s.language || 'zh';
-    $('stt-model').value = s.stt_model || '';
-    $('ollama-model').value = s.ollama_model || '';
-    $('ollama-keepalive').value = s.ollama_keep_alive || '30m';
-    $('polish-enabled').checked = !!s.polish_enabled;
-    $('polish-prompt').value = s.polish_prompt || '';
-    // Streaming is always off for now (the on-radio is disabled). We still
-    // restore the saved value so it round-trips correctly when v0.2 lands.
-    $('streaming-' + (s.streaming_enabled ? 'on' : 'off')).checked = true;
-    $('debug').checked = !!s.debug;
+    applySettings(s);
   } catch (e) {
     showStatus('加载设置失败: ' + e, 'error');
   }
@@ -25,10 +32,25 @@ async function loadSettings() {
   } catch (e) { /* ignore */ }
 }
 
+/// Re-read `settings.json` from disk and refresh the form. Pairs with
+/// the diff-skip in `Settings::save` (#11) — together they let a user
+/// (or automation) edit settings.json directly without losing the
+/// change to a subsequent save or quit.
+async function reloadSettings() {
+  try {
+    const s = await window.t.invoke('cmd_reload_settings');
+    applySettings(s);
+    showStatus('已从磁盘重新加载', 'success');
+  } catch (e) {
+    showStatus('重新加载失败: ' + e, 'error');
+  }
+}
+
 function readSettings() {
   return {
-    hotkey: $('hotkey').value.trim() || 'Cmd+Shift+Space',
+    hotkey: $('hotkey').value.trim() || 'Cmd+[',
     language: $('language').value,
+    stt_backend: $('stt-backend').value,
     stt_model: $('stt-model').value.trim(),
     ollama_model: $('ollama-model').value.trim(),
     ollama_keep_alive: $('ollama-keepalive').value.trim() || '30m',
@@ -147,8 +169,9 @@ document.addEventListener('keydown', (e) => {
 });
 
 $('record-hotkey').addEventListener('click', startCapture);
-$('clear-hotkey').addEventListener('click', () => stopCapture('Cmd+Shift+Space'));
+$('clear-hotkey').addEventListener('click', () => stopCapture('Cmd+['));
 $('save').addEventListener('click', saveSettings);
+$('reload').addEventListener('click', reloadSettings);
 $('test-stt').addEventListener('click', testStt);
 $('test-polish').addEventListener('click', testPolish);
 $('open-log-dir').addEventListener('click', async () => {
@@ -169,16 +192,30 @@ function showStatus(msg, type) {
   }
 }
 
-// State badge — live updates from the pipeline
-async function pollState() {
+// State badge — initial snapshot plus live pipeline events.
+function applyStateBadge(state) {
+  const badge = $('state-badge');
+  badge.textContent = state;
+  badge.className = 'badge ' + state;
+}
+
+async function loadState() {
   try {
     const state = await window.t.invoke('cmd_get_state');
-    const badge = $('state-badge');
-    badge.textContent = state;
-    badge.className = 'badge ' + state;
+    applyStateBadge(state);
   } catch (e) { /* ignore */ }
 }
-setInterval(pollState, 500);
+
+(async () => {
+  try {
+    if (window.t.event && window.t.event.listen) {
+      await window.t.event.listen('state-changed', (event) => {
+        if (typeof event.payload === 'string') applyStateBadge(event.payload);
+      });
+    }
+  } catch (e) { /* initial snapshot still provides a useful state */ }
+  loadState();
+})();
 
 // Init
 loadSettings();

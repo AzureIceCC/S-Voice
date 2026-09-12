@@ -72,12 +72,38 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> Result<(), TrayError> {
             "debug_toggle" => {
                 let settings = app.state::<crate::ArcState>();
                 let new_value = !settings.read().debug;
-                settings.write().debug = new_value;
-                let _ = settings.read().save();
-                if let Err(e) = crate::logging::set_debug(new_value) {
-                    tracing::warn!("tray debug toggle failed: {e}");
+                // Update + save in a single write-lock scope to keep
+                // the lock brief and to allow `Settings::save` to
+                // update its in-memory `last_known_disk` snapshot
+                // (#11). Layer-2 protection here means a tray toggle
+                // also won't clobber an external edit.
+                let saved = {
+                    let mut s = settings.write();
+                    let old_value = s.debug;
+                    s.debug = new_value;
+                    match s.save() {
+                        Ok(crate::settings::SaveOutcome::Written)
+                        | Ok(crate::settings::SaveOutcome::Unchanged) => true,
+                        Ok(crate::settings::SaveOutcome::ExternalEditConflict) => {
+                            s.debug = old_value;
+                            tracing::warn!(
+                                "tray debug toggle skipped: settings.json changed externally"
+                            );
+                            false
+                        }
+                        Err(e) => {
+                            s.debug = old_value;
+                            tracing::warn!("tray debug toggle save failed: {e}");
+                            false
+                        }
+                    }
+                };
+                if saved {
+                    if let Err(e) = crate::logging::set_debug(new_value) {
+                        tracing::warn!("tray debug toggle failed: {e}");
+                    }
+                    tracing::info!("debug toggled via tray: {}", new_value);
                 }
-                tracing::info!("debug toggled via tray: {}", new_value);
             }
             "show_log" => {
                 let dir = crate::logging::log_dir();
@@ -85,13 +111,26 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> Result<(), TrayError> {
                 let _ = std::process::Command::new("open").arg(&dir).spawn();
             }
             "restart_stt" => {
-                let _ =
-                    std::process::Command::new(crate::stt_client::stt_stop_script_path()).output();
-                if let Err(e) =
-                    std::process::Command::new(crate::stt_client::stt_script_path()).output()
-                {
-                    tracing::warn!("restart stt failed: {e}");
-                }
+                let stop_script = crate::stt_client::stt_stop_script_path();
+                let start_script = crate::stt_client::stt_script_path();
+                tauri::async_runtime::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let _ = std::process::Command::new(stop_script).output();
+                        std::process::Command::new(start_script).output()
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(output)) if output.status.success() => {
+                            tracing::info!("STT service restarted from tray");
+                        }
+                        Ok(Ok(output)) => tracing::warn!(
+                            "restart stt failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                        Ok(Err(e)) => tracing::warn!("restart stt failed: {e}"),
+                        Err(e) => tracing::warn!("restart stt worker failed: {e}"),
+                    }
+                });
             }
             "quit" => app.exit(0),
             _ => {}

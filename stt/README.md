@@ -28,13 +28,15 @@ python -m uvicorn stt_server:app --host 127.0.0.1 --port 18787 --log-level info
 | `STT_LANG`  | `zh` | default language if client doesn't pass one |
 | `STT_HOST`  | `127.0.0.1` | bind host |
 | `STT_PORT`  | `18787` | bind port |
+| `STT_IDLE_UNLOAD_SEC` | `1800` | unload the model after this many idle seconds; `0` disables |
+| `STT_PREWARM` | `1` | allow predictive model loading through `/prewarm` |
 
 ## API
 
 ### `GET /health`
 
 ```json
-{ "status": "ok", "model": "...", "default_language": "zh", "port": 18787 }
+{ "status": "ok", "model": "...", "default_language": "zh", "port": 18787, "model_loaded": true, "idle_sec": 12.3 }
 ```
 
 ### `GET /config`

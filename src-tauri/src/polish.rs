@@ -2,10 +2,21 @@
 
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::OnceLock;
 use std::time::Duration;
 use thiserror::Error;
 
 const OLLAMA_BASE: &str = "http://localhost:11434";
+
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(2))
+            .build()
+            .expect("building the static Ollama HTTP client should not fail")
+    })
+}
 
 #[derive(Debug, Error)]
 pub enum PolishError {
@@ -40,6 +51,60 @@ const DEFAULT_PROMPT: &str = r#"你是语音输入润色助手。用户给你一
 
 pub async fn polish(text: &str, model: &str, keep_alive: &str) -> Result<String, PolishError> {
     polish_with_prompt(text, model, keep_alive, DEFAULT_PROMPT).await
+}
+
+/// Fire-and-forget prewarm: nudge Ollama to (re)load `model` in the
+/// background. Called when the user presses the global hotkey — while
+/// the user is still speaking, Ollama's MLX backend loads the 9B
+/// weights from disk; by the time /polish runs, the model is hot.
+///
+/// Implementation: send a minimal `/api/generate` with empty prompt
+/// and `keep_alive: keep_alive` so the model stays in memory after
+/// the prewarm round-trip. Deliberately returns immediately so the
+/// press-to-record path isn't gated on Ollama's response.
+pub async fn prewarm(model: &str, keep_alive: &str) {
+    let started = std::time::Instant::now();
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": "",
+        "stream": false,
+        "keep_alive": keep_alive,
+        "think": false,
+        "options": {"num_predict": 1, "num_ctx": 2048}
+    });
+    // 10s timeout is intentional: the first call to Ollama after the
+    // model has been unloaded can take 1-3s to spawn the runner + load
+    // weights, especially for the MLX backend. A 500ms cap (the value
+    // we tried first) made prewarm fire-and-forget *too* fast and
+    // silently dropped the request — the model would then still be
+    // cold by the time the real /polish fired. The 500ms is on the
+    // press-to-record path: 10s is fine because this is the background
+    // prewarm task, not the call the user is waiting on.
+    let res = client()
+        .post(format!("{OLLAMA_BASE}/api/generate"))
+        .timeout(Duration::from_secs(10))
+        .json(&body)
+        .send()
+        .await;
+    match res {
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            tracing::info!(
+                "Ollama prewarm done: model={} status={} elapsed={}ms body_len={}",
+                model,
+                status,
+                started.elapsed().as_millis(),
+                body.len()
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Ollama prewarm failed (non-fatal, elapsed={}ms): {e}",
+                started.elapsed().as_millis()
+            );
+        }
+    }
 }
 
 pub async fn polish_with_prompt(
@@ -78,7 +143,7 @@ pub async fn polish_with_prompt(
     });
 
     let t0 = std::time::Instant::now();
-    let res = reqwest::Client::new()
+    let res = client()
         .post(format!("{OLLAMA_BASE}/api/generate"))
         .json(&body)
         // Hard cap on the request itself; Ollama can hang indefinitely
